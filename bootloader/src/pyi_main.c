@@ -19,6 +19,13 @@
     #include <windows.h>
     #include <wchar.h>
 #endif
+#ifdef __CYGWIN__
+    #include <sys/cygwin.h>  /* cygwin_conv_path */
+    #include <windows.h>  /* SetDllDirectoryW */
+    /* NOTE: SetDllDirectoryW is part of KERNEL32, which is automatically
+     * linked by Cygwin, so we do not need to explicitly link any
+     * win32 libraries. */
+#endif
 #include <stdio.h>  /* FILE */
 #include <stdlib.h> /* calloc */
 #include <string.h> /* memset */
@@ -135,16 +142,27 @@ pyi_main(int argc, char * argv[])
 #endif
 
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__CYGWIN__)
     if (extractionpath) {
         /* Add extraction folder to DLL search path */
-        wchar_t * dllpath_w;
-        dllpath_w = pyi_win32_utils_from_utf8(NULL, extractionpath, 0);
-        SetDllDirectory(dllpath_w);
-        VS("LOADER: SetDllDirectory(%s)\n", extractionpath);
-        free(dllpath_w);
+        wchar_t dllpath_w[PATH_MAX];
+#if defined(__CYGWIN__)
+        /* Cygwin */
+        if (cygwin_conv_path(CCP_POSIX_TO_WIN_W | CCP_RELATIVE, extractionpath, dllpath_w, PATH_MAX) != 0) {
+            FATAL_PERROR("cygwin_conv_path", "Failed to convert DLL search path!\n");
+            return -1;
+        }
+#else
+        /* Windows */
+        if (pyi_win32_utils_from_utf8(dllpath_w, extractionpath, PATH_MAX) == NULL) {
+            FATALERROR("Failed to convert DLL search path!\n");
+            return -1;
+        }
+#endif  /* defined(__CYGWIN__) */
+        VS("LOADER: SetDllDirectory(%S)\n", dllpath_w);
+        SetDllDirectoryW(dllpath_w);
     }
-#endif
+#endif  /* defined(_WIN32) || defined(__CYGWIN__) */
 
     /*
      * Check for splash screen resources.
@@ -198,6 +216,24 @@ pyi_main(int argc, char * argv[])
             strcpy(archive_status->mainpath, archive_status->temppath);
         }
 
+        /* On macOS in windowed mode, process Apple events and convert
+         * them to sys.argv - but only if we are in onedir mode! */
+#if defined(__APPLE__) && defined(WINDOWED)
+        if (!in_child) {
+            /* Initialize argc_pyi and argv_pyi with argc and argv */
+            if (pyi_utils_initialize_args(archive_status->argc, archive_status->argv) < 0) {
+                return -1;
+            }
+            /* Process Apple events; this updates argc_pyi/argv_pyi
+             * accordingly */
+            pyi_process_apple_events(true);  /* short_timeout */
+            /* Update pointer to arguments */
+            pyi_utils_get_args(&archive_status->argc, &archive_status->argv);
+            /* TODO: do we need to de-register Apple event handlers before
+             * entering python? */
+        }
+#endif
+
         /* Main code to initialize Python and run user's code. */
         pyi_launch_initialize(archive_status);
         rc = pyi_launch_execute(archive_status);
@@ -207,6 +243,11 @@ pyi_main(int argc, char * argv[])
          * execution mode, i.e. when using --onedir on Windows or macOS. */
         pyi_splash_finalize(splash_status);
         pyi_splash_status_free(&splash_status);
+
+#if defined(__APPLE__) && defined(WINDOWED)
+        /* Clean up arguments that were used with Apple event processing .*/
+        pyi_utils_free_args();
+#endif
     }
     else {
 

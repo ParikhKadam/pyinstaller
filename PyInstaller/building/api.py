@@ -332,6 +332,10 @@ class EXE(Target):
                 On Windows or OSX governs whether to use the console executable
                 or the windowed executable. Always True on Linux/Unix (always
                 console executable - it does not matter there).
+            disable_windowed_traceback
+                Disable traceback dump of unhandled exception in windowed
+                (noconsole) mode (Windows and macOS only), and instead display
+                a message that this feature is disabled.
             debug
                 Setting to True gives you progress mesages from the executable
                 (for console=False there will be annoying MessageBoxes on Windows).
@@ -380,6 +384,8 @@ class EXE(Target):
         self.bootloader_ignore_signals = kwargs.get(
             'bootloader_ignore_signals', False)
         self.console = kwargs.get('console', True)
+        self.disable_windowed_traceback = kwargs.get(
+            'disable_windowed_traceback', False)
         self.debug = kwargs.get('debug', False)
         self.name = kwargs.get('name', None)
         self.icon = kwargs.get('icon', None)
@@ -465,7 +471,20 @@ class EXE(Target):
             # no value; presence means "true"
             self.toc.append(("pyi-bootloader-ignore-signals", "", "OPTION"))
 
+        if self.disable_windowed_traceback:
+            # no value; presence means "true"
+            self.toc.append(("pyi-disable-windowed-traceback", "", "OPTION"))
+
         if is_win:
+            if not self.icon:
+                # --icon not specified; use default from bootloader folder
+                if self.console:
+                    icon = 'icon-console.ico'
+                else:
+                    icon = 'icon-windowed.ico'
+                self.icon = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)),
+                    'bootloader', 'images', icon)
             filename = os.path.join(CONF['workpath'], CONF['specnm'] + ".exe.manifest")
             self.manifest = winmanifest.create_manifest(filename, self.manifest,
                 self.console, self.uac_admin, self.uac_uiaccess)
@@ -597,12 +616,6 @@ class EXE(Target):
             os.close(fd)
             self._copyfile(exe, tmpnm)
             os.chmod(tmpnm, 0o755)
-            if not self.icon:
-                # --icon not specified; use default from bootloader folder
-                self.icon = os.path.join(
-                    os.path.dirname(os.path.dirname(__file__)),
-                    'bootloader', 'images',
-                    'icon-console.ico' if self.console else 'icon-windowed.ico')
             if self.icon != "NONE":
                 icon.CopyIcons(tmpnm, self.icon)
             if self.versrsrc:

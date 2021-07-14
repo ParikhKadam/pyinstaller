@@ -24,6 +24,11 @@ from waflib.Configure import conf
 from waflib import Logs, Utils, Options
 from waflib.Build import BuildContext, InstallContext
 
+# waf doesn't work unless it's ran from in this folder so it is safe to assume
+# the current working directory here.
+sys.path.insert(0, os.path.realpath("../PyInstaller/"))
+import _shared_with_waf
+
 # The following two variables are used by the target "waf dist"
 VERSION = 'nodist'
 APPNAME = 'PyInstallerBootloader'
@@ -83,23 +88,12 @@ else:
 is_cross = None
 
 
-def machine():
+def machine(ctx):
     """
-    Differenciate path to bootloader with machine name if necessary.
-
-    Machine name in bootloader is necessary only for non-x86 architecture.
+    Determine path to bootloader based on C compiler target.
     """
-    # IMPORTANT: Keep this in line with PyInstaller.compat.machine()
-    mach = platform.machine()
-    if mach.startswith('arm'):
-        return 'arm'
-    elif mach.startswith('aarch'):
-        return 'aarch'
-    elif mach.startswith('sw_64'):
-        return 'sw_64'
-    else:
-        # Assume x86/x86_64 machine.
-        return None
+    return _shared_with_waf._pyi_machine(
+        ctx.env.DEST_CPU, DESTOS_TO_SYSTEM[ctx.env.DEST_OS])
 
 
 def assoc_programm(ctx, name):
@@ -187,14 +181,14 @@ def options(ctx):
                    action='store_true',
                    help='When building for 64-bit platform, build universal2 '
                         'fat binary (x86_64, arm64). (This is the default.).',
-                   default=True,
+                   default=None,
                    dest='macos_universal2')
     grp.add_option('--no-universal2',
                    action='store_false',
                    help='When building for 64-bit platform, build a thin '
                         'binary. Allows building with older toolchains that '
                         'do not support universal2 binaries.',
-                   default=True,
+                   default=None,
                    dest='macos_universal2')
 
 @conf
@@ -289,7 +283,13 @@ def detect_arch(ctx):
         # the bits and this is testing the pointer size (via module struct).
         # We do the same here.
         arch = "%sbit" % (8 * check_sizeof_pointer(ctx))
-        ctx.msg('Platform', '%s-%s detected based on compiler' % (system, arch))
+        _machine = machine(ctx)
+        if _machine is not None:
+            plat = '%s-%s-%s detected based on compiler' \
+                   % (system, arch, _machine)
+        else:
+            plat = '%s-%s detected based on compiler' % (system, arch)
+        ctx.msg('Platform', plat)
         ctx.env.ARCH_FLAGS_REQUIRED = False
     if not arch in ('32bit','64bit'):
         ctx.fatal('Unrecognized target architecture: %s' % arch)
@@ -345,8 +345,20 @@ def set_arch_flags(ctx):
         if ctx.env.PYI_ARCH == '32bit':
             mac_arch = ['-arch', 'i386']
         else:
+            UNIVERSAL2_FLAGS = ['-arch', 'x86_64', '-arch', 'arm64']
+            if ctx.options.macos_universal2 in (None, True):
+                # Check for universal2 support if set to auto-detect
+                # (neither --universal2 nor --no-universal2 is provided),
+                # or if universal2 is explicitly enabled
+                supported = ctx.check_cc(
+                    cflags=UNIVERSAL2_FLAGS,
+                    linkflags=UNIVERSAL2_FLAGS,
+                    features='c cprogram',
+                    msg='Checking for universal2 support',
+                    mandatory=ctx.options.macos_universal2)
+                ctx.options.macos_universal2 = supported
             if ctx.options.macos_universal2:
-                mac_arch = ['-arch', 'x86_64', '-arch', 'arm64']
+                mac_arch = UNIVERSAL2_FLAGS
             else:
                 mac_arch = ['-arch', 'x86_64']
         ctx.env.append_value('CFLAGS', mac_arch)
@@ -377,7 +389,7 @@ def set_arch_flags(ctx):
 
     # Other compiler - not msvc.
     else:
-        if machine() == 'sw_64':
+        if machine(ctx) == 'sw_64':
             # The gcc has no '-m64' option under sw64 machine, but the
             # __x86_64__ macro needs to be defined
             ctx.env.append_value('CCDEFINES', '__x86_64__')
@@ -594,13 +606,14 @@ def configure(ctx):
 
     if ctx.env.DEST_OS == 'win32':
         if ctx.env.CC_NAME == 'msvc':
-            ctx.check_libs_msvc('user32 comctl32 kernel32 advapi32',
+            ctx.check_libs_msvc('user32 comctl32 kernel32 advapi32 gdi32',
                                 mandatory=True)
         else:
             ctx.check_cc(lib='user32', mandatory=True)
             ctx.check_cc(lib='comctl32', mandatory=True)
             ctx.check_cc(lib='kernel32', mandatory=True)
             ctx.check_cc(lib='advapi32', mandatory=True)
+            ctx.check_cc(lib='gdi32', mandatory=True)
     else:
         # Mac OS X and FreeBSD do not need libdl.
         # https://stackoverflow.com/questions/20169660/where-is-libdl-so-on-mac-os-x
@@ -748,8 +761,8 @@ def build(ctx):
                                 ctx.env.PYI_SYSTEM + "-" + ctx.env.PYI_ARCH)
     install_path = os.path.normpath(install_path)
 
-    if machine() and ctx.env.DEST_OS != 'darwin':
-        install_path += '-' + machine()
+    if machine(ctx) and ctx.env.DEST_OS != 'darwin':
+        install_path += '-' + machine(ctx)
 
     if not ctx.env.LIB_Z:
         # If the operating system does not provide zlib, build our own. The
@@ -779,7 +792,7 @@ def build(ctx):
             source=['src/main.c'],
             target=exe_name,
             install_path=install_path,
-            use='OBJECTS USER32 COMCTL32 KERNEL32 ADVAPI32 Z',
+            use='OBJECTS USER32 COMCTL32 KERNEL32 ADVAPI32 GDI32 Z',
             includes='src windows zlib',
             features=features,
         )
@@ -811,6 +824,22 @@ def build(ctx):
             stlib=staticlibs,
             install_path=install_path,
             features=features)
+
+    # This warning is deliberately at the end of the build in the hopes that
+    # it'll be more visible amongst all the other stuff written to stdout.
+    if machine(ctx) and machine(ctx) == "unknown":
+        Logs.log.warning(
+            "The target architecture reported by the compiler '%s' was not "
+            "recognised and defaulted to 'unknown'. "
+            "You should verify that `PyInstaller.compat.machine` is also "
+            "'unknown' on the target machine. "
+            "If it isn't then please add '%s' to "
+            "`PyInstaller._shared_with_waf._pyi_machine()` "
+            "and submit a pull request. "
+            "Without this match, PyInstaller will not be able to find the "
+            "bootloaders you just built!"
+            % (ctx.env.DEST_CPU, ctx.env.DEST_CPU)
+        )
 
     ctx.recurse("tests")
 

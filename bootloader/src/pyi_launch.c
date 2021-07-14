@@ -42,6 +42,7 @@
 #include "pyi_python.h"
 #include "pyi_pythonlib.h"
 #include "pyi_win32_utils.h"  /* CreateActContext */
+#include "pyi_exception_dialog.h"
 
 /* Max count of possible opened archives in multipackage mode. */
 #define _MAX_ARCHIVE_POOL_LEN 20
@@ -385,13 +386,28 @@ _pyi_extract_exception_message(PyObject *pvalue)
 }
 
 /*
+ * Traceback formatting options for _pyi_extract_exception_traceback.
+ */
+enum
+{
+    /* String representation of the list containing traceback lines. */
+    PYI_TB_FMT_REPR = 0,
+    /* Concatenate the traceback lines into single string, using
+     * default LF newlines. */
+    PYI_TB_FMT_LF = 1,
+    /* Concatenate the traceback lines into single string, and replace
+     * the LF newlines with CRLF. */
+    PYI_TB_FMT_CRLF = 2
+};
+
+/*
  * Extract python exception traceback from error indicator data
  * returned by PyErr_Fetch().
  * Returns a copy of traceback string or NULL. Must be freed by caller.
  */
 static char *
 _pyi_extract_exception_traceback(PyObject *ptype, PyObject *pvalue,
-                                 PyObject *ptraceback)
+                                 PyObject *ptraceback, int fmt_mode)
 {
     PyObject *module;
     char *retval = NULL;
@@ -403,10 +419,29 @@ _pyi_extract_exception_traceback(PyObject *ptype, PyObject *pvalue,
         PyObject *func = PI_PyObject_GetAttrString(module, "format_exception");
         if (func) {
             PyObject *tb, *tb_str;
-            const char *tb_cchar;
+            const char *tb_cchar = NULL;
             tb = PI_PyObject_CallFunctionObjArgs(func, ptype, pvalue,
                                                  ptraceback, NULL);
-            tb_str = PI_PyObject_Str(tb);
+            if (fmt_mode == PYI_TB_FMT_REPR) {
+                /* Represent the list as string */
+                tb_str = PI_PyObject_Str(tb);
+            } else {
+                /* Join the list using empty string */
+                PyObject *tb_empty = PI_PyUnicode_FromString("");
+                tb_str = PI_PyUnicode_Join(tb_empty, tb);
+                Py_DECREF(tb_empty);
+                if (fmt_mode == PYI_TB_FMT_CRLF) {
+                    /* Replace LF with CRLF */
+                    PyObject *lf = PI_PyUnicode_FromString("\n");
+                    PyObject *crlf = PI_PyUnicode_FromString("\r\n");
+                    PyObject *tb_str_crlf = PI_PyUnicode_Replace(tb_str, lf, crlf, -1);
+                    Py_DECREF(lf);
+                    Py_DECREF(crlf);
+                    /* Swap */
+                    Py_DECREF(tb_str);
+                    tb_str = tb_str_crlf;
+                }
+            }
             tb_cchar = PI_PyUnicode_AsUTF8(tb_str);
             if (tb_cchar) {
                 retval = strdup(tb_cchar);
@@ -439,14 +474,14 @@ pyi_launch_run_scripts(ARCHIVE_STATUS *status)
     __main__ = PI_PyImport_AddModule("__main__");
 
     if (!__main__) {
-        FATALERROR("Could not get __main__ module.");
+        FATALERROR("Could not get __main__ module.\n");
         return -1;
     }
 
     main_dict = PI_PyModule_GetDict(__main__);
 
     if (!main_dict) {
-        FATALERROR("Could not get __main__ module's dict.");
+        FATALERROR("Could not get __main__ module's dict.\n");
         return -1;
     }
 
@@ -468,12 +503,17 @@ pyi_launch_run_scripts(ARCHIVE_STATUS *status)
 
             /* Unmarshall code object */
             code = PI_PyMarshal_ReadObjectFromString((const char *) data, ptoc->ulen);
-
             if (!code) {
                 FATALERROR("Failed to unmarshal code object for %s\n", ptoc->name);
                 PI_PyErr_Print();
                 return -1;
             }
+
+            /* Store the code object to __main__ module's _pyi_main_co
+             * attribute, so it can be retrieved by FrozenImporter,
+             * if necessary. */
+            PI_PyObject_SetAttrString(__main__, "_pyi_main_co", code);
+
             /* Run it */
             retval = PI_PyEval_EvalCode(code, main_dict, main_dict);
 
@@ -481,9 +521,10 @@ pyi_launch_run_scripts(ARCHIVE_STATUS *status)
              * (Since we evaluate module-level code, which is not allowed to return an
              * object, the Python object returned is always None.) */
             if (!retval) {
-                #if defined(WINDOWED) && defined(LAUNCH_DEBUG)
-                    /* In windowed mode, we will display error details in
-                     * dialogs. For that, we need to extract the error
+                #if defined(WINDOWED)
+                    /* In windowed mode, we need to display error information
+                     * via non-console means (i.e., error dialog on Windows,
+                     * syslog on macOS). For that, we need to extract the error
                      * indicator data before PyErr_Print() call below clears
                      * it. But it seems that for PyErr_Print() to properly
                      * exit on SystemExit(), we also need to restore the error
@@ -493,35 +534,54 @@ pyi_launch_run_scripts(ARCHIVE_STATUS *status)
                      */
                     PyObject *ptype, *pvalue, *ptraceback;
                     char *msg_exc, *msg_tb;
+                    int fmt_mode = PYI_TB_FMT_REPR;
+
+                    #if defined(_WIN32)
+                        fmt_mode = PYI_TB_FMT_CRLF;
+                    #elif defined(__APPLE__)
+                        fmt_mode = PYI_TB_FMT_LF;
+                    #endif
 
                     PI_PyErr_Fetch(&ptype, &pvalue, &ptraceback);
                     msg_exc = _pyi_extract_exception_message(pvalue);
-                    msg_tb = _pyi_extract_exception_traceback(ptype, pvalue,
-                                                              ptraceback);
+                    if (pyi_arch_get_option(status, "pyi-disable-windowed-traceback") != NULL) {
+                        /* Traceback is disabled via option */
+                        msg_tb = strdup("Traceback is disabled via bootloader option.");
+                    } else {
+                        msg_tb = _pyi_extract_exception_traceback(
+                            ptype, pvalue, ptraceback, fmt_mode);
+                    }
                     PI_PyErr_Restore(ptype, pvalue, ptraceback);
                 #endif
 
                 /* If the error was SystemExit, PyErr_Print calls exit() without
-                 * returning. This means we won't print "Failed to execute" on 
+                 * returning. This means we won't print "Failed to execute" on
                  * normal SystemExit's.
                  */
                 PI_PyErr_Print();
-                FATALERROR("Failed to execute script %s\n", ptoc->name);
 
-                #if defined(WINDOWED) && defined(LAUNCH_DEBUG)
-                    /* As console is unavailable in windowed mode, we display
-                     * error details (exception message and traceback) in
-                     * additional error dialogs (Windows only).
-                     */
-                    if (msg_exc) {
-                        FATALERROR("Error: %s\n", msg_exc);
-                        free(msg_exc);
-                    }
-                    if (msg_tb) {
-                        FATALERROR("Traceback: %s\n", msg_tb);
-                        free(msg_tb);
-                    }
-                #endif /* if defined(WINDOWED) and defined(LAUNCH_DEBUG) */
+                /* Display error information */
+                #if !defined(WINDOWED)
+                    /* Non-windowed mode; PyErr_print() above dumps the
+                     * traceback, so the only thing we need to do here
+                     * is provide a summary */
+                     FATALERROR("Failed to execute script '%s' due to unhandled exception!\n", ptoc->name);
+                #else
+                    #if defined(_WIN32)
+                        /* Windows; use custom dialog */
+                        pyi_unhandled_exception_dialog(ptoc->name, msg_exc, msg_tb);
+                    #elif defined(__APPLE__)
+                        /* macOS .app bundle; use FATALERROR(), which
+                         * prints to stderr (invisible) as well as sends
+                         * the message to syslog */
+                         FATALERROR("Failed to execute script '%s' due to unhandled exception: %s\n", ptoc->name, msg_exc);
+                         FATALERROR("Traceback:\n%s\n", msg_tb);
+                    #endif
+
+                    /* Clean up exception information strings */
+                    free(msg_exc);
+                    free(msg_tb);
+                #endif /* if !defined(WINDOWED) */
 
                 /* Be consistent with python interpreter, which returns
                  * 1 if it exits due to unhandled exception.
@@ -535,66 +595,6 @@ pyi_launch_run_scripts(ARCHIVE_STATUS *status)
     }
     return 0;
 }
-
-/*
- * call a simple "int func(void)" entry point.  Assumes such a function
- * exists in the main namespace.
- * Return non zero on failure, with -2 if the specific error is
- * that the function does not exist in the namespace.
- */
-int
-callSimpleEntryPoint(char *name, int *presult)
-{
-    int rc = -1;
-    /* Objects with no ref. */
-    PyObject *mod, *dict;
-    /* Objects with refs to kill. */
-    PyObject *func = NULL, *pyresult = NULL;
-
-    mod = PI_PyImport_AddModule("__main__");  /* NO ref added */
-
-    if (!mod) {
-        VS("LOADER: No __main__\n");
-        goto done;
-    }
-    dict = PI_PyModule_GetDict(mod);  /* NO ref added */
-
-    if (!mod) {
-        VS("LOADER: No __dict__\n");
-        goto done;
-    }
-    func = PI_PyDict_GetItemString(dict, name);
-
-    if (func == NULL) {  /* should explicitly check KeyError */
-        VS("LOADER: CallSimpleEntryPoint can't find the function name\n");
-        rc = -2;
-        goto done;
-    }
-    pyresult = PI_PyObject_CallFunction(func, "");
-
-    if (pyresult == NULL) {
-        goto done;
-    }
-    PI_PyErr_Clear();
-    *presult = PI_PyLong_AsLong(pyresult);
-    rc = PI_PyErr_Occurred() ? -1 : 0;
-    VS( rc ? "LOADER: Finished with failure\n" : "LOADER: Finished OK\n");
-    /* all done! */
-done:
-    Py_XDECREF(func);
-    Py_XDECREF(pyresult);
-
-    /* can't leave Python error set, else it may
-     *  cause failures in later async code */
-    if (rc) {
-        /* But we will print them 'cos they may be useful */
-        PI_PyErr_Print();
-    }
-    PI_PyErr_Clear();
-    return rc;
-}
-
-/* For finer grained control. */
 
 void
 pyi_launch_initialize(ARCHIVE_STATUS * status)

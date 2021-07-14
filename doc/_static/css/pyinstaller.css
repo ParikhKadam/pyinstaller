@@ -91,6 +91,7 @@ div.note p.admonition-title:after {
 }
 	
 /* --- Inline literals. --- */
+html.writer-html5 .rst-content dl[class]:not(.option-list):not(.field-list):not(.footnote):not(.glossary):not(.simple).option > dt,
 .rst-content code.literal, .rst-content tt.literal {
   color: #034040;
   background: unset;
@@ -100,6 +101,7 @@ div.note p.admonition-title:after {
 }
 /* Inline literals with link targets
  * (usually generated with :func:`PyInstaller.foo.bar`). */
+html.writer-html5 .rst-content dl[class]:not(.option-list):not(.field-list):not(.footnote):not(.glossary):not(.simple).option > dt,
 .rst-content a code.literal, .rst-content tt.literal {
   border-bottom: solid 1px #0001;
 }
@@ -118,3 +120,18 @@ div.note p.admonition-title:after {
    a little black stub poking out under the scrollbar. */
 .wy-nav-side { padding-bottom: unset; }
 .wy-menu-vertical { padding-bottom: 1em; }
+
+/* Autodoc functions/classes */
+html.writer-html4 .rst-content dl:not(.docutils) > dt,
+html.writer-html5 .rst-content dl[class]:not(.option-list):not(.field-list):not(.footnote):not(.glossary):not(.simple):not(.option) > dt {
+  /* This is a loose merge of the styles for inline literals and headings. */
+  background-color: #EEEA;
+  border: 2px outset #e1e4e520;
+  color: #034040;
+}
+
+/* Space the bullet list entries out slightly only in the changelog to make
+them more readable. */
+.rst-content .section[id="changelog-for-pyinstaller"] ul li { margin-bottom: 14px; }
+/* But don't space out lists within lists because they look stupid. */
+.rst-content .section[id="changelog-for-pyinstaller"] ul li ul li { margin-bottom: unset; }

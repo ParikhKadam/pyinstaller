@@ -33,7 +33,7 @@ This will produce the |bootloader| executables for your current platform
 * :file:`../PyInstaller/bootloader/{OS_ARCH}/runw_d` (OS X and Windows only).
 
 The bootloaders architecture defaults to the machine's one, but can be changed
-using the ``--target-arch=`` option – given the appropriate compiler and
+using the :option:`--target-arch` option – given the appropriate compiler and
 development files are installed. E.g. to build a 32-bit bootloader on a 64-bit
 machine, run::
 
@@ -108,6 +108,17 @@ refer to ``python ./waf --help`` for further options related to LSB building.
        as LSB binary.
 
 
+Cross Building for Different Architectures
+------------------------------------------
+
+Bootloaders can be built for other architectures such as ARM or MIPS using
+Docker_.
+The :blob:`bootloader/Dockerfile` contains the instructions on how to do this.
+Open it in some flavour of text previewer to see them::
+
+    less bootloader/Dockerfile
+
+
 Building for Mac OS X
 ========================
 
@@ -117,11 +128,15 @@ Instead of installing the full `Xcode` package, you can also install
 and use `Command Line Tools for Xcode <https://developer.apple.com/download/more/>`_.
 Installing either will provide the `clang` compiler.
 
-By default, 64-bit bootloaders are built as `universal2` fat binaries
-that support both `x86_64` and `arm64` architectures, which requires a
-recent version of `Xcode` (12.2 or later). If you wish to use an older
-version of `Xcode`, you can build the single-arch thin bootloader by
-passing ``--no-universal2`` flag to the ``waf`` build command.
+If the toolchain supports `universal2` binaries, the 64-bit bootloaders
+are by default built as `universal2` fat binaries that support both
+`x86_64` and `arm64` architectures. This requires a recent version
+of `Xcode` (12.2 or later). On older toolchains that lack support for
+`universal2` binaries, a single-arch `x86_64` thin bootloader is
+built. This behavior can be controlled by passing ``--universal2`` or
+``--no-universal2``  flags to the ``waf`` build command. Attempting to
+use ``--universal2`` flag and a toolchain that lacks support for
+`universal2` binaries will result in configuration error.
 
 Now you can build the bootloader as shown above.
 
